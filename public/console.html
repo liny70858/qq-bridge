@@ -1771,6 +1771,8 @@ button:active:not(:disabled) {
       <button data-view="social-v2" class="nav-item"><span class="nav-icon" aria-hidden="true">◈</span>二代仿真<span class="nav-note">V2</span></button>
       <button data-view="social-v1" class="nav-item"><span class="nav-icon" aria-hidden="true">◇</span>一代仿真<span class="nav-note">V1</span></button>
       <button data-view="slang" class="nav-item"><span class="nav-icon" aria-hidden="true">▤</span>黑话词库</button>
+      <button data-view="memory" class="nav-item"><span class="nav-icon" aria-hidden="true">▥</span>长期记忆</button>
+      <button data-view="emotion" class="nav-item"><span class="nav-icon" aria-hidden="true">♡</span>情感状态</button>
       <div class="nav-label">管理</div>
       <button data-view="usage" class="nav-item"><span class="nav-icon" aria-hidden="true">◧</span>令牌与花费</button>
       <button data-view="access" class="nav-item"><span class="nav-icon" aria-hidden="true">⊙</span>访问与安全</button>
@@ -2040,6 +2042,7 @@ button:active:not(:disabled) {
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="setWakeConfig"> <span><b>qq_set_wake_config</b><span class="meta">设置唤醒/潜水条件：无限期、有限时间、@/名字/关键词/概率等</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="markRead"> <span><b>qq_mark_read</b><span class="meta">标记当前未读为已读（看过但决定不回复）</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="memory"> <span><b>qq_memory_append / qq_memory_query</b><span class="meta">轻量记忆：话题/想说的话/群友印象</span></span></label>
+        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="longMemory"> <span><b>qq_long_memory_add / qq_long_memory_list</b><span class="meta">长期记忆：会淡忘的长期事实（喜好/约定/身份/状态）</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="slangQuery"> <span><b>qq_slang_query</b><span class="meta">查询已确认黑话/梗/网络表达</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="slangSubmit"> <span><b>qq_slang_submit</b><span class="meta">AI 提交陌生词/黑话给管理员筛选</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="listStickers"> <span><b>qq_list_stickers</b><span class="meta">查看/搜索 QQ 收藏表情（含备注和本地笔记）</span></span></label>
@@ -2418,6 +2421,51 @@ button:active:not(:disabled) {
         </div>
       </details>
     </section>
+
+<section id="section-memory" data-page="memory" class="card span-all">
+      <h2>长期记忆（会淡忘）</h2>
+      <div class="meta">每条记忆带时间、按半衰期慢慢淡忘（不删，只是越来越难被想起来）。AI 聊天时会按当前问句召回相关记忆注入上下文。默认只手动维护；把 <code>config.json</code> 的 <code>memory.autoCapture</code> 设为 <code>true</code> 后，才会在「记住… / 我喜欢…」这类话上自动记，且受每日配额约束。</div>
+
+      <div class="row" style="margin-top:8px">
+        <input type="text" id="memFilterScope" placeholder="会话 key（如 group:123，留空=全部）" style="flex:1">
+        <button id="memRefresh" class="small">刷新</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input type="text" id="memText" placeholder="记忆内容（第一人称，如：她胃不好，不能吃辣的）" style="flex:1">
+        <input type="text" id="memScope" placeholder="会话 key（如 group:123）" style="width:220px">
+      </div>
+      <div class="row" style="margin-top:6px">
+        <input type="text" id="memFactKey" placeholder="事实键（如 她.胃，可留空）" style="flex:1">
+        <select id="memImportance" style="width:130px"><option value="0">随口提过</option><option value="0.5" selected>比较重要</option><option value="1">非常重要</option></select>
+        <label style="display:flex;align-items:center;gap:6px;margin:0"><input type="checkbox" id="memProfile"> 长期事实</label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="memAdd" class="small">添加记忆</button>
+        <span class="meta" id="memMsg"></span>
+      </div>
+      <div class="memory-scroll" id="memList" style="margin-top:10px;max-height:420px;overflow:auto">加载中…</div>
+
+      <div class="divider"></div>
+      <div class="meta" style="margin-bottom:6px">测试召回（看某句话会想起哪些记忆）</div>
+      <div class="row">
+        <input type="text" id="memRecallScope" placeholder="会话 key（可选）" style="width:220px">
+        <input type="text" id="memRecallQuery" placeholder="问句，如：她胃最近怎么样" style="flex:1">
+        <button id="memRecall" class="small">测试</button>
+      </div>
+      <pre id="memRecallOut" style="margin-top:8px;white-space:pre-wrap;font-size:12px;background:var(--surface-chip-strong);padding:10px;border-radius:8px;max-height:300px;overflow:auto">（尚未测试）</pre>
+    </section>
+
+<section id="section-emotion" data-page="emotion" class="card span-all">
+      <h2>情感状态</h2>
+      <div class="meta">每个会话一份会演化、会回归基线的心情，由最近的对话按规则式情感词典自然演化；AI 回复时会带上「此刻状态」注入，让语气更有连续性。可单独重置某个会话或全部清空。</div>
+      <div class="row" style="margin-top:8px">
+        <button id="emoRefresh" class="small">刷新</button>
+        <button id="emoResetAll" class="small danger">清空全部</button>
+        <span class="meta" id="emoMsg"></span>
+      </div>
+      <div class="memory-scroll" id="emoList" style="margin-top:10px;max-height:420px;overflow:auto">加载中…</div>
+    </section>
+
 <section id="section-reference" data-page="reference" class="card span-all">
       <h2>DSH 侧 MCP 工具</h2>
       <div class="meta">由 qq-bridge 的 MCP server 提供给 DSH agent；修改后需重启 DSH 才会刷新工具 schema。</div>
@@ -4422,6 +4470,114 @@ async function changeConsoleToken(generate) {
 document.getElementById('consoleTokenSave').addEventListener('click', () => changeConsoleToken(false));
 document.getElementById('consoleTokenRandom').addEventListener('click', () => changeConsoleToken(true));
 
+// ── 长期记忆 + 情感状态（控制台页面）────────────────────────────────────────
+function memEscape(s) { return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+let memCache = [];
+
+async function loadMemoryStore() {
+  const scope = document.getElementById('memFilterScope').value.trim();
+  try {
+    const r = await api('/api/memory' + (scope ? '?scope=' + encodeURIComponent(scope) : ''));
+    memCache = r.entries || [];
+    document.getElementById('memMsg').textContent = r.writable ? '' : '（只读降级）';
+    renderMemoryList();
+  } catch (e) {
+    document.getElementById('memList').innerHTML = '<span class="meta">加载失败</span>';
+  }
+}
+function renderMemoryList() {
+  const box = document.getElementById('memList');
+  if (!memCache.length) { box.innerHTML = '<span class="meta">暂无记忆（上面添加一条，或开自动记录让 AI 自己记）</span>'; return; }
+  box.innerHTML = memCache.map((m) => {
+    const when = (m.at || m.createdAt || '').slice(0, 16).replace('T', ' ');
+    const badge = m.category === 'stable_profile' ? '<span class="tag">长期事实</span>' : '';
+    const sup = m.superseded ? '<span class="tag" style="color:var(--warn-fg-strong)">已被取代</span>' : '';
+    const scope = m.scope ? '<span class="meta">' + memEscape(m.scope) + '</span>' : '';
+    const key = m.factKey ? '<div class="meta">事实键：' + memEscape(m.factKey) + ' · 重要度 ' + m.importance + '</div>' : '';
+    return '<div style="padding:6px 0;border-bottom:1px solid var(--surface-chip-strong)">'
+      + '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' + badge + sup + scope
+      + '<span class="meta">' + memEscape(when) + '</span>'
+      + '<button class="small danger" data-mem-del="' + m.id + '" style="margin-left:auto">删除</button></div>'
+      + '<div style="margin-top:2px">' + memEscape(m.text) + '</div>' + key
+      + '</div>';
+  }).join('');
+  box.querySelectorAll('[data-mem-del]').forEach((b) => b.addEventListener('click', () => deleteMemory(b.dataset.memDel)));
+}
+async function deleteMemory(id) {
+  const r = await api('/api/memory/delete', 'POST', { id });
+  if (r.ok) { showConsoleToast('已删除'); loadMemoryStore(); }
+  else showConsoleToast(r.error || '删除失败');
+}
+async function addMemory() {
+  const text = document.getElementById('memText').value.trim();
+  if (!text) { showConsoleToast('请填写记忆内容'); return; }
+  const r = await api('/api/memory', 'POST', {
+    text,
+    scope: document.getElementById('memScope').value.trim(),
+    importance: Number(document.getElementById('memImportance').value),
+    category: document.getElementById('memProfile').checked ? 'stable_profile' : '',
+    factKey: document.getElementById('memFactKey').value.trim(),
+  });
+  if (r.ok) { document.getElementById('memText').value = ''; document.getElementById('memFactKey').value = ''; showConsoleToast('已添加'); loadMemoryStore(); }
+  else showConsoleToast(r.error || '添加失败');
+}
+async function testRecall() {
+  const scope = document.getElementById('memRecallScope').value.trim();
+  const query = document.getElementById('memRecallQuery').value.trim();
+  if (!query) { showConsoleToast('请填写问句'); return; }
+  const out = document.getElementById('memRecallOut');
+  out.textContent = '…';
+  try {
+    const r = await api('/api/memory/recall', 'POST', { scope, query });
+    if (!r.ok) { out.textContent = r.error || '失败'; return; }
+    let txt = r.rendered || '（无召回）';
+    if (r.gate) txt = '[问句信息量门 ' + r.gate.info + ' vs ' + r.gate.threshold + ']\n' + txt;
+    if (r.scored && r.scored.length) {
+      txt += '\n\n—— 候选（C=证据 P=总分）——\n'
+        + r.scored.map((s) => s.C.toFixed(2) + '/' + s.P.toFixed(2) + (s.omission ? ' · ' + s.omission : '') + '  ' + s.text).join('\n');
+    }
+    out.textContent = txt;
+  } catch (e) { out.textContent = '请求失败'; }
+}
+
+async function loadEmotionStore() {
+  try {
+    const r = await api('/api/emotion');
+    const states = r.states || [];
+    const box = document.getElementById('emoList');
+    document.getElementById('emoMsg').textContent = r.writable ? '' : '（只读降级）';
+    if (!states.length) { box.innerHTML = '<span class="meta">暂无情感状态（有群聊互动后会自动出现）</span>'; return; }
+    box.innerHTML = states.map((s) => {
+      const mood = (s.mood > 0 ? '+' : '') + (s.mood || 0).toFixed(2);
+      const when = (s.updatedAt || '').slice(0, 16).replace('T', ' ');
+      return '<div style="padding:6px 0;border-bottom:1px solid var(--surface-chip-strong);display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+        + '<strong>' + memEscape(s.key) + '</strong>'
+        + '<span class="tag">' + memEscape(s.tag) + '</span>'
+        + '<span class="meta">心情 ' + mood + ' · 活跃 ' + (s.arousal || 0).toFixed(2) + ' · 倾向 ' + (s.tendency || 0).toFixed(2) + ' · ' + memEscape(when) + '</span>'
+        + '<button class="small danger" data-emo-reset="' + memEscape(s.key) + '" style="margin-left:auto">重置</button></div>';
+    }).join('');
+    box.querySelectorAll('[data-emo-reset]').forEach((b) => b.addEventListener('click', () => resetEmotion(b.dataset.emoReset)));
+  } catch (e) {
+    document.getElementById('emoList').innerHTML = '<span class="meta">加载失败</span>';
+  }
+}
+async function resetEmotion(key) {
+  const r = await api('/api/emotion/reset', 'POST', { key });
+  if (r.ok) { showConsoleToast('已重置'); loadEmotionStore(); }
+  else showConsoleToast(r.error || '重置失败');
+}
+
+document.getElementById('memRefresh').addEventListener('click', loadMemoryStore);
+document.getElementById('memFilterScope').addEventListener('change', loadMemoryStore);
+document.getElementById('memAdd').addEventListener('click', addMemory);
+document.getElementById('memRecall').addEventListener('click', testRecall);
+document.getElementById('emoRefresh').addEventListener('click', loadEmotionStore);
+document.getElementById('emoResetAll').addEventListener('click', async () => {
+  const r = await api('/api/emotion/reset', 'POST', {});
+  if (r.ok) { showConsoleToast('已清空全部'); loadEmotionStore(); }
+  else showConsoleToast(r.error || '清空失败');
+});
+
 // Presentation layer: keep every existing control mounted so drafts and API contracts survive navigation.
 const consolePages = {
   overview: ['运行总览', '让每一次连接，都自然发生。', '掌握桥接状态，轻松管理你的 QQ 智能伙伴。'],
@@ -4430,6 +4586,8 @@ const consolePages = {
   'social-v2': ['二代仿真', '自主参与，恰到好处。', '管理 AI 的工具、唤醒与发言节奏。展开需要调整的分组，修改后保存参数。'],
   'social-v1': ['一代仿真', '为自然对话，设定合适的节奏。', '调整参与概率、活跃周期和分条发送；所有配置项完整保留。'],
   slang: ['黑话词库', '读懂群聊里的，言外之意。', '从候选到确认，让 AI 逐渐熟悉大家的表达习惯。'],
+  memory: ['长期记忆', '记住该记的，淡忘该忘的。', '给 AI 一份会淡忘的长期记忆，按当前问句自动召回。'],
+  emotion: ['情感状态', '让心情，有迹可循。', '每个会话一份会演化、会回归基线的心情，让语气更有连续性。'],
   usage: ['令牌与花费', '每一次思考，都算得清楚。', '实时查看 AI 的 token 消耗与花费，可下钻到每个群、每个好友、每一轮对话。'],
   access: ['访问与安全', '明确边界，安心连接。', '管理允许对话的对象、管理员权限与控制台访问凭证。'],
   operations: ['调试与运维', '让桥接，始终井然有序。', '测试消息、引导 AI，或维护桥接进程与会话工作区。'],
@@ -5047,7 +5205,7 @@ document.getElementById('usageClear').addEventListener('click', async () => {
 
 setConsolePage(location.hash.slice(1), { updateHash:false });
 
-refresh(); refreshRoles(); refreshWhitelist(); refreshSessions(); refreshPending(); refreshPresets(); loadSocialForm(); loadV2Config(); refreshV2Activity(); loadV2ToolLog(); loadV2SessionOptions(); refreshSocialStatus(); refreshSlang(); loadSlangConfig(); loadSecurity(); refreshSimPrompt(); refreshDshModel(); refreshUsage(); refreshUsageChart(); refreshUsageRecent();
+refresh(); refreshRoles(); refreshWhitelist(); refreshSessions(); refreshPending(); refreshPresets(); loadSocialForm(); loadV2Config(); refreshV2Activity(); loadV2ToolLog(); loadV2SessionOptions(); refreshSocialStatus(); refreshSlang(); loadSlangConfig(); loadMemoryStore(); loadEmotionStore(); loadSecurity(); refreshSimPrompt(); refreshDshModel(); refreshUsage(); refreshUsageChart(); refreshUsageRecent();
 setInterval(() => { refresh(); refreshSessions(); refreshPending(); refreshSocialStatus(); refreshSlang(); }, 3000);
 // 用量看板只在本页可见时轮询：既保证「实时」，又不让其它页白白多打两份接口。
 setInterval(() => { if (currentConsolePage !== 'usage') return; refreshUsage(); refreshUsageChart(); refreshUsageRecent(); }, 3000);

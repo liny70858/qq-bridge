@@ -68,6 +68,20 @@
     "workspaceTitle": "QQ 黑话学习",
     "autoResearch": true
   },
+  "memory": {
+    "enabled": true,
+    "autoCapture": false,
+    "autoExtract": false,
+    "extractMinMessages": 12,
+    "extractCooldownMs": 600000,
+    "learnerPreset": "qq-chat",
+    "workspaceTitle": "QQ 长期记忆"
+  },
+  "emotion": {
+    "enabled": true,
+    "alpha": 0.35,
+    "moodHalfLifeHours": 6
+  },
   "social": {
     "enabled": true,
     "maxReplyChars": 500,

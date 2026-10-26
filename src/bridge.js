@@ -54,6 +54,29 @@ import {
   applyStickerNote,
   markStickerUsed
 } from './sticker-lib.js';
+import {
+  loadMemories,
+  saveMemories,
+  buildMemoryContext,
+  recallMemories,
+  renderMemories,
+  createMemoryEntry,
+  collapseByFactKey,
+  resolvePolicy,
+  createSpeechStats,
+  recordSpeech,
+  normalizeMemoryEntry,
+  buildMemoryExtractionPrompt,
+  parseMemoryExtractionJson,
+  MEMORY_MAX_ENTRIES
+} from './memory.js';
+import {
+  loadEmotions,
+  saveEmotions,
+  defaultEmotionState,
+  updateEmotion,
+  buildEmotionContext
+} from './emotion.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -68,6 +91,9 @@ const SOCIAL_V2_FILE = path.join(STATE_DIR, 'social-v2.json');
 const INITIAL_PROMPTS_FILE = path.join(STATE_DIR, 'initial-prompts.json');
 const STICKER_FILE = path.join(STATE_DIR, 'stickers.json');
 const FEEDBACK_FILE = path.join(STATE_DIR, 'feedback.json');
+const MEMORY_FILE = path.join(STATE_DIR, 'memory.json');
+const EMOTION_FILE = path.join(STATE_DIR, 'emotion.json');
+const MEMORY_SESSION_FILE = path.join(STATE_DIR, 'memory-session.json');
 const TOOL_LOG_FILE = path.join(STATE_DIR, 'tool-calls.jsonl');
 const TOKEN_USAGE_FILE = path.join(STATE_DIR, 'token-usage.jsonl');
 const ACTIVITY_LOG = path.join(STATE_DIR, 'qq-activity.log');
@@ -710,6 +736,27 @@ function loadConfig() {
       autoResearch: true,
       ...(file.slang ?? {})
     },
+    // 长期记忆（会淡忘）：参数语义见 src/memory.js 的 DEFAULT_POLICY；这里只放桥接侧自己的开关。
+    // recall 的权重/门槛/配额等算法参数直接落在 cfg.memory（同名键，会被 resolvePolicy 收进范围）。
+    memory: {
+      enabled: true,
+      // 保守的自动记录：只在「记住/别忘了…」显式指令或清晰的自我事实时记，且受 dailyQuota 约束。
+      autoCapture: false,
+      // 模型提炼自动记录：独立 learner 会话从近期消息里判断「值不值得记」并出事实键/重要度。
+      autoExtract: false,
+      extractMinMessages: 12,
+      extractCooldownMs: 10 * 60 * 1000,
+      learnerPreset: 'qq-chat',
+      workspaceTitle: 'QQ 长期记忆',
+      ...(file.memory ?? {})
+    },
+    // 情感状态（每会话一份，会演化、会回归基线）：见 src/emotion.js。
+    emotion: {
+      enabled: true,
+      alpha: 0.35,           // 心情对每条消息的响应快慢（0~1，越大越敏感）
+      moodHalfLifeHours: 6,  // 没有输入时心情多久淡一半
+      ...(file.emotion ?? {})
+    },
     social: {
       enabled: true,
       // 启动阶段（观望）
@@ -772,6 +819,7 @@ function loadConfig() {
         setWakeConfig: true,
         markRead: true,
         memory: true,
+        longMemory: true,
         getImages: true,
         getForwardMsg: true,
         sendPoke: true,
@@ -895,6 +943,7 @@ function loadConfig() {
     setWakeConfig: true,
     markRead: true,
     memory: true,
+    longMemory: true,
     slangQuery: true,
     slangSubmit: true,
     getImages: true,
@@ -1410,6 +1459,33 @@ async function main() {
   const learnerWaiters = new Map();     // sessionId -> [{resolve,reject,timer}]
   let slangLearnerSessionId = null;
   let slangTaskChain = Promise.resolve();
+
+  // ── 长期记忆 + 情感状态 ──────────────────────────────────────────────────
+  // 记忆/情感都按 QQ 会话（key）组织，与 slang 同一套「读失败只读不写」的降级。
+  const memoryPolicy = resolvePolicy(cfg.memory); // 算法参数已在启动时收进范围、权重凑 100%
+  let memoryEntries = [];
+  let memoryStoreWritable = true;
+  const memorySpeechStats = new Map();   // key -> { n, df }：说话尺（问句门槛/证据加权，内存态）
+  let memoryDayCount = { day: '', n: 0 }; // 每日自动记录配额计数
+  const memoryAgentDayCount = new Map(); // key -> { day, n }：AI 主动记（qq_long_memory_add）每日配额
+  const memoryWindows = new Map();       // key -> [{sender,text,time}]：模型提炼的近期消息窗口
+  const memoryExtractionCooldowns = new Map(); // key -> timestamp
+  let memoryLearnerSessionId = null;
+  try {
+    memoryEntries = loadMemories(MEMORY_FILE, { onCorrupt: (message) => log(`⚠️ ${message}`) });
+  } catch (error) {
+    memoryStoreWritable = false;
+    log(`⚠️ 记忆库加载失败，已暂停写入以免覆盖磁盘数据（修好后重启即可恢复）：${error?.message ?? error}`);
+  }
+  let emotionStates = new Map();
+  let emotionStoreWritable = true;
+  let lastEmotionSave = 0;
+  try {
+    emotionStates = loadEmotions(EMOTION_FILE, { onCorrupt: (message) => log(`⚠️ ${message}`) });
+  } catch (error) {
+    emotionStoreWritable = false;
+    log(`⚠️ 情感库加载失败，已暂停写入以免覆盖磁盘数据：${error?.message ?? error}`);
+  }
 
   // ── 表情包体系（二代仿真）本地知识库 ────────────────────────────────────
   // 库文件损坏/读不动时**不能当成空库继续**：下面任何一次 saveStickerStoreSafe 都会把
@@ -2079,6 +2155,202 @@ async function main() {
     } catch (error) { log('保存黑话库失败:', error?.message ?? error); }
   }
 
+  // ── 长期记忆 + 情感状态：读写与触发 ─────────────────────────────────────
+  function saveMemoryStore() {
+    if (!memoryStoreWritable) {
+      log('⚠️ 记忆库处于只读降级状态（启动时加载失败），本次改动不落盘');
+      return;
+    }
+    try {
+      const result = saveMemories(MEMORY_FILE, memoryEntries);
+      if (result?.dropped > 0) {
+        memoryEntries = result.entries;
+        log(`记忆库超过 ${MEMORY_MAX_ENTRIES} 条上限，已丢弃 ${result.dropped} 条最旧记忆`);
+      }
+    } catch (error) { log('保存记忆库失败:', error?.message ?? error); }
+  }
+
+  function saveEmotionStoreThrottled() {
+    if (!emotionStoreWritable) return;
+    const now = Date.now();
+    if (now - lastEmotionSave < 10000) return; // 高频群消息下别每条都写盘
+    lastEmotionSave = now;
+    try { saveEmotions(EMOTION_FILE, emotionStates); }
+    catch (error) { log('保存情感库失败:', error?.message ?? error); }
+  }
+
+  // 保守的自动记录：只在显式指令或清晰的自我事实时记，受每日配额约束。
+  function maybeAutoCaptureMemory(key, text) {
+    if (cfg.memory?.autoCapture !== true) return;
+    const t = String(text || '').trim();
+    if (!t || t.length > 400) return;
+    let captured = null;
+    const explicit = t.match(/(?:记住|记一下|别忘了|记得)(?::|：|,|，|\s)?(.{2,120})/);
+    if (explicit) captured = { text: explicit[1].trim(), importance: 0.5, category: '', factKey: '' };
+    if (!captured) {
+      const selfFact = t.match(/^(?:我喜欢|我讨厌|我养了|我养|我住|我怕|我过敏|我叫|我生日|我今年|我是)(.{2,120})$/);
+      if (selfFact) captured = { text: t, importance: 0.5, category: 'stable_profile', factKey: '' };
+    }
+    if (!captured) return;
+    const d = new Date();
+    const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    if (memoryDayCount.day !== today) memoryDayCount = { day: today, n: 0 };
+    if (memoryDayCount.n >= (memoryPolicy.dailyQuota || 8)) return;
+    memoryDayCount.n += 1;
+    memoryEntries.push(createMemoryEntry({ ...captured, scope: key }));
+    collapseByFactKey(memoryEntries, 'auto');
+    saveMemoryStore();
+  }
+
+  // 情感更新（用户消息与 AI 回复共用）：把一段文本喂进对应会话的心情状态。
+  function recordEmotionForKey(key, text) {
+    if (cfg.emotion?.enabled === false) return;
+    let es = emotionStates.get(key);
+    if (!es) { es = defaultEmotionState(); emotionStates.set(key, es); }
+    updateEmotion(es, text, {
+      now: Date.now(),
+      alpha: Number(cfg.emotion?.alpha ?? 0.35),
+      moodHalfLifeHours: Number(cfg.emotion?.moodHalfLifeHours ?? 6),
+    });
+    saveEmotionStoreThrottled();
+  }
+
+  // 每条用户消息进一次：喂说话尺 + 更新情感 + 尝试自动记录。
+  function recordChatForMemoryAndEmotion(key, text) {
+    if (cfg.memory?.enabled !== false) {
+      let ss = memorySpeechStats.get(key);
+      if (!ss) { ss = createSpeechStats(); memorySpeechStats.set(key, ss); }
+      recordSpeech(ss, text);
+      maybeAutoCaptureMemory(key, text);
+    }
+    recordEmotionForKey(key, text);
+  }
+
+  // ── 模型提炼自动记录（独立 learner 会话，仿 slang-learner）─────────────────
+  async function ensureMemoryLearnerSession() {
+    const preset = resolvePresetName(cfg.memory?.learnerPreset || cfg.agentPreset, { strict: true });
+    if (!preset) throw new Error('记忆提炼缺少已验证的安全 preset，拒绝创建或复用会话');
+    const saved = readJsonSafe(MEMORY_SESSION_FILE, null);
+    if (saved?.preset !== preset) invalidateMemoryLearnerSession();
+    if (memoryLearnerSessionId) {
+      learnerSessions.add(memoryLearnerSessionId);
+      api.events.follow(memoryLearnerSessionId);
+      return memoryLearnerSessionId;
+    }
+    if (saved?.sessionId && saved.preset === preset) {
+      memoryLearnerSessionId = String(saved.sessionId);
+      learnerSessions.add(memoryLearnerSessionId);
+      api.events.follow(memoryLearnerSessionId);
+      await ensureChatModel(memoryLearnerSessionId);
+      return memoryLearnerSessionId;
+    }
+    const dir = path.join(STATE_DIR, 'memory-agent');
+    fs.mkdirSync(dir, { recursive: true });
+    const wsValue = unwrap(await api.workspace.create({ path: dir }), 'memory workspace.create');
+    const workspaceTitle = cfg.memory?.workspaceTitle || 'QQ 长期记忆';
+    if (wsValue.created && workspaceTitle) {
+      try { await api.workspace.rename({ workspaceId: wsValue.workspace.workspaceId, title: workspaceTitle }); } catch {}
+    }
+    const params = { workspaceId: wsValue.workspace.workspaceId };
+    params.agentPreset = preset;
+    const value = unwrap(await api.sessions.create(params), 'memory session.create');
+    memoryLearnerSessionId = value.sessionId;
+    learnerSessions.add(memoryLearnerSessionId);
+    api.events.follow(memoryLearnerSessionId);
+    await ensureChatModel(memoryLearnerSessionId);
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    atomicWriteJson(MEMORY_SESSION_FILE, { sessionId: memoryLearnerSessionId, preset });
+    log(`记忆提炼会话已创建：${memoryLearnerSessionId}`);
+    return memoryLearnerSessionId;
+  }
+
+  function invalidateMemoryLearnerSession() {
+    const oldId = memoryLearnerSessionId;
+    memoryLearnerSessionId = null;
+    if (oldId && !learnerWaiters.has(oldId) && !learnerCollectors.has(oldId)) {
+      learnerSessions.delete(oldId);
+    }
+    try { fs.unlinkSync(MEMORY_SESSION_FILE); } catch {}
+  }
+
+  async function runMemoryExtraction(key) {
+    if (cfg.memory?.autoExtract !== true) return;
+    if (!dshReady) return;
+    const messages = memoryWindows.get(key) ?? [];
+    const min = Math.max(2, Number(cfg.memory?.extractMinMessages ?? 12));
+    if (messages.length < min) return;
+
+    let sessionId;
+    try {
+      sessionId = await ensureMemoryLearnerSession();
+    } catch (error) {
+      log(`记忆提炼会话创建失败 (${key}):`, error?.message ?? error);
+      return;
+    }
+
+    const promptText = buildMemoryExtractionPrompt(messages);
+    try {
+      const accepted = await api.sessions.prompt({ sessionId, mode: 'queue', content: [{ type: 'text', text: promptText }] });
+      if (!accepted.result.ok) {
+        log(`记忆提炼被拒 (${key}): ${accepted.result.error.code}: ${accepted.result.error.message}`);
+        return;
+      }
+      const output = await waitLearnerTurn(sessionId);
+      const items = parseMemoryExtractionJson(output);
+      const win = memoryWindows.get(key) ?? [];
+      memoryWindows.set(key, win.slice(messages.length));
+      if (!items.length) {
+        log(`记忆提炼：${key} 未发现值得记的事`);
+        return;
+      }
+      let added = 0;
+      for (const item of items) {
+        memoryEntries.push(createMemoryEntry({
+          text: item.text,
+          scope: key,
+          importance: item.importance,
+          factKey: item.factKey,
+          category: item.category,
+        }));
+        added += 1;
+      }
+      collapseByFactKey(memoryEntries, 'extract');
+      saveMemoryStore();
+      log(`记忆提炼：${key} 新增 ${added} 条`);
+    } catch (error) {
+      if (/会话|session|not found|404/i.test(String(error?.message ?? error))) {
+        invalidateMemoryLearnerSession();
+      }
+      log(`记忆提炼失败 (${key}):`, error?.message ?? error);
+    }
+  }
+
+  function maybeQueueMemoryExtraction(key) {
+    if (cfg.memory?.autoExtract !== true) return;
+    if (!dshReady) return;
+    const cooldown = Number(cfg.memory?.extractCooldownMs ?? 600000);
+    const last = memoryExtractionCooldowns.get(key) ?? 0;
+    if (Date.now() - last < cooldown) return;
+    const messages = memoryWindows.get(key) ?? [];
+    const min = Math.max(2, Number(cfg.memory?.extractMinMessages ?? 12));
+    if (messages.length < min) return;
+    memoryExtractionCooldowns.set(key, Date.now());
+    queueSlangTask(() => runMemoryExtraction(key));
+  }
+
+  // 模型提炼的素材入口：与 feedSlangWindow 同款滚动窗口（只学当前消息自己的文字）。
+  function feedMemoryWindow(key, sender, plainContent) {
+    if (cfg.memory?.autoExtract !== true) return;
+    if (!key || !plainContent || typeof plainContent !== 'string') return;
+    const text = plainContent.trim();
+    if (!text || text.startsWith('/')) return;
+    if (!memoryWindows.has(key)) memoryWindows.set(key, []);
+    const win = memoryWindows.get(key);
+    win.push({ sender: String(sender || '未知'), text: truncateText(text, 200), time: Date.now() });
+    if (win.length > 120) win.splice(0, win.length - 120);
+    maybeQueueMemoryExtraction(key);
+  }
+
   function queueSlangTask(fn) {
     slangTaskChain = slangTaskChain.then(fn).catch((error) => log('黑话学习任务异常:', error?.message ?? error));
     return slangTaskChain;
@@ -2337,12 +2609,21 @@ async function main() {
       .map(publicSlangEntry);
   }
 
-  function withSlangContext(promptText) {
+  function withSlangContext(promptText, key, queryText) {
     const now = new Date();
     const timeLine = `【当前时间】${now.toLocaleString('zh-CN', { hour12: false })}（${Intl.DateTimeFormat().resolvedOptions().timeZone}）`;
     const parts = [timeLine];
     if (cfg.slang?.enabled !== false) {
       const block = buildSlangContext(slangEntries, cfg.slang?.injectMax ?? 8);
+      if (block) parts.push(block);
+    }
+    if (cfg.memory?.enabled !== false) {
+      const scoped = memoryEntries.filter((m) => m.scope === key);
+      const block = buildMemoryContext(scoped, queryText || promptText, { policy: memoryPolicy, speech: memorySpeechStats.get(key) || null });
+      if (block) parts.push(block);
+    }
+    if (cfg.emotion?.enabled !== false) {
+      const block = buildEmotionContext(emotionStates.get(key));
       if (block) parts.push(block);
     }
     return parts.join('\n\n') + '\n\n' + promptText;
@@ -3376,7 +3657,9 @@ async function main() {
             || url.pathname.startsWith('/api/socialV2/')
             || url.pathname.startsWith('/api/send/')
             || url.pathname.startsWith('/api/images/')
-            || url.pathname === '/api/authorize/read';
+            || url.pathname === '/api/authorize/read'
+            || url.pathname === '/api/memory/agent-add'
+            || url.pathname === '/api/memory/agent-list';
           if (!agentAllowed) {
             sendJson({ ok: false, error: '该接口仅控制台可用' }, 403);
             return;
@@ -3398,7 +3681,11 @@ async function main() {
               || url.pathname === '/api/socialV2/sticker-note'
               || url.pathname === '/api/socialV2/sticker-remark'
               || url.pathname === '/api/socialV2/collect-sticker')) ? '表情库'
-              : '';
+              : (!memoryStoreWritable && (url.pathname === '/api/memory'
+                || url.pathname === '/api/memory/update'
+                || url.pathname === '/api/memory/delete')) ? '记忆库'
+                : (!emotionStoreWritable && (url.pathname === '/api/emotion/reset')) ? '情感库'
+                : '';
           if (readonlyStore) {
             sendJson({ ok: false, error: `${readonlyStore}处于只读降级状态（启动时加载失败，未覆盖原文件），本次修改不会落盘；请修复 state/ 下的对应文件后重启桥接` }, 503);
             return;
@@ -3752,6 +4039,146 @@ async function main() {
           } catch (error) {
             sendJson({ ok: false, error: error?.message ?? '还原失败' }, 500);
           }
+          return;
+        }
+
+        // ── 长期记忆 + 情感状态 ────────────────────────────────────────────
+        if (req.method === 'GET' && url.pathname === '/api/memory') {
+          const scope = url.searchParams.get('scope') || '';
+          const list = (scope ? memoryEntries.filter((m) => m.scope === scope) : memoryEntries).slice()
+            .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+          sendJson({
+            entries: list,
+            config: { enabled: cfg.memory?.enabled !== false, autoCapture: cfg.memory?.autoCapture === true },
+            policy: memoryPolicy,
+            writable: memoryStoreWritable,
+            total: memoryEntries.length,
+          });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/memory') {
+          const body = await readBody();
+          const text = String(body.text ?? '').trim();
+          if (!text) { sendJson({ ok: false, error: '记忆内容不能为空' }, 400); return; }
+          const entry = createMemoryEntry({
+            text,
+            scope: String(body.scope ?? '').trim(),
+            importance: Number(body.importance) || 0,
+            emotion: (body.emotion === null || body.emotion === undefined) ? null : Number(body.emotion),
+            category: body.category === 'stable_profile' ? 'stable_profile' : '',
+            factKey: String(body.factKey ?? '').trim(),
+            at: body.at ? String(body.at) : '',
+            tags: Array.isArray(body.tags) ? body.tags.map(String).filter(Boolean) : [],
+          });
+          memoryEntries.push(entry);
+          collapseByFactKey(memoryEntries, 'console');
+          saveMemoryStore();
+          log(`控制台：新增记忆「${text.slice(0, 40)}」${entry.scope ? `（${entry.scope}）` : ''}`);
+          sendJson({ ok: true, entry });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/memory/update') {
+          const body = await readBody();
+          const idx = memoryEntries.findIndex((e) => e.id === String(body.id ?? ''));
+          if (idx < 0) { sendJson({ ok: false, error: '记忆不存在' }, 404); return; }
+          const patch = body.patch && typeof body.patch === 'object' ? body.patch : {};
+          const next = normalizeMemoryEntry({ ...memoryEntries[idx], ...patch, id: memoryEntries[idx].id });
+          memoryEntries[idx] = next;
+          collapseByFactKey(memoryEntries, 'console');
+          saveMemoryStore();
+          sendJson({ ok: true, entry: next });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/memory/delete') {
+          const body = await readBody();
+          const ids = new Set((Array.isArray(body.ids) ? body.ids : [body.id]).map(String).filter(Boolean));
+          const before = memoryEntries.length;
+          memoryEntries = memoryEntries.filter((e) => !ids.has(e.id));
+          saveMemoryStore();
+          log(`控制台：删除记忆 ${before - memoryEntries.length} 条`);
+          sendJson({ ok: true, removed: before - memoryEntries.length });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/memory/recall') {
+          const body = await readBody();
+          const scope = String(body.scope ?? '').trim();
+          const query = String(body.query ?? '').trim();
+          if (!query) { sendJson({ ok: false, error: '请提供要测试的问句' }, 400); return; }
+          const scoped = scope ? memoryEntries.filter((m) => m.scope === scope) : memoryEntries;
+          const r = recallMemories(scoped, query, { policy: memoryPolicy, speech: memorySpeechStats.get(scope) || null });
+          sendJson({
+            ok: true,
+            rendered: renderMemories(r.selected),
+            selected: r.selected.map((row) => ({ id: row.m.id, text: row.m.text, C: row.s.C, P: row.s.P })),
+            gate: r.gate,
+            scored: r.scored.slice(0, 12).map((row) => ({ id: row.m.id, text: row.m.text, C: row.s.C, P: row.s.P, omission: row.omission })),
+          });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/memory/agent-add') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const text = String(body.text ?? '').trim();
+          if (!key) { sendJson({ ok: false, error: '缺少会话 key' }, 400); return; }
+          if (req.headers['x-agent-token'] && !v2ToolEnabled('longMemory')) { sendJson({ ok: false, error: '工具未启用：qq_long_memory_add' }, 403); return; }
+          if (!agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (!text) { sendJson({ ok: false, error: '记忆内容不能为空' }, 400); return; }
+          if (!memoryStoreWritable) { sendJson({ ok: false, error: '记忆库处于只读降级状态，本次不落盘' }, 503); return; }
+          // 每日配额（与自动记录同一道闸，防止 AI 把鸡毛蒜皮全记下来塞满上下文）。
+          const d = new Date();
+          const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+          const cnt = memoryAgentDayCount.get(key);
+          if (!cnt || cnt.day !== today) memoryAgentDayCount.set(key, { day: today, n: 0 });
+          if (memoryAgentDayCount.get(key).n >= (memoryPolicy.dailyQuota || 8)) {
+            sendJson({ ok: false, error: `今天已记满 ${memoryPolicy.dailyQuota || 8} 条，请挑真正值得记的` }, 429);
+            return;
+          }
+          memoryAgentDayCount.get(key).n += 1;
+          const entry = createMemoryEntry({
+            text,
+            scope: key,
+            importance: Number(body.importance) || 0,
+            factKey: String(body.factKey ?? '').trim(),
+          });
+          memoryEntries.push(entry);
+          const { superseded } = collapseByFactKey(memoryEntries, 'agent');
+          saveMemoryStore();
+          log(`AI 记记忆（${key}）：${text.slice(0, 40)}${superseded.length ? `（取代 ${superseded.length} 条）` : ''}`);
+          sendJson({ ok: true, message: '✓', entry });
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/memory/agent-list') {
+          const key = String(url.searchParams.get('key') ?? '').trim();
+          if (!key) { sendJson({ ok: false, error: '缺少会话 key' }, 400); return; }
+          if (req.headers['x-agent-token'] && !v2ToolEnabled('longMemory')) { sendJson({ ok: false, error: '工具未启用：qq_long_memory_list' }, 403); return; }
+          if (!agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          const list = memoryEntries.filter((m) => m.scope === key && !m.superseded && !m.skip)
+            .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+          sendJson({ entries: list.map((m) => ({ id: m.id, text: m.text, at: m.at, importance: m.importance, factKey: m.factKey, category: m.category })) });
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/emotion') {
+          const list = [...emotionStates.entries()].map(([key, st]) => ({ key, ...st }))
+            .sort((a, b) => a.key.localeCompare(b.key, 'zh-CN'));
+          sendJson({
+            states: list,
+            config: { enabled: cfg.emotion?.enabled !== false, alpha: cfg.emotion?.alpha, moodHalfLifeHours: cfg.emotion?.moodHalfLifeHours },
+            writable: emotionStoreWritable,
+          });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/emotion/reset') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          if (key) {
+            emotionStates.delete(key);
+            log(`控制台：重置情感状态 ${key}`);
+          } else {
+            emotionStates.clear();
+            log('控制台：清空全部情感状态');
+          }
+          try { saveEmotions(EMOTION_FILE, emotionStates); } catch (error) { log('保存情感库失败:', error?.message ?? error); }
+          sendJson({ ok: true });
           return;
         }
 
@@ -4424,7 +4851,7 @@ async function main() {
             merged.autoReplyCheckMs = Number.isFinite(n) ? Math.max(1000, Math.round(n)) : (current.autoReplyCheckMs ?? 30000);
           }
           // tools：只接受布尔开关
-          const toolFlags = ['getPrompt', 'getUnread', 'getRecent', 'socialState', 'sendGroup', 'sendPrivate', 'reply', 'sendBurst', 'sendMessage', 'waitMessages', 'feedback', 'getMyRecent', 'getMessageDetail', 'getActiveMembers', 'setWakeConfig', 'markRead', 'memory', 'slangQuery', 'slangSubmit', 'getImages', 'getForwardMsg', 'sendPoke', 'listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker', 'getSelfImage', 'sendVoice'];
+          const toolFlags = ['getPrompt', 'getUnread', 'getRecent', 'socialState', 'sendGroup', 'sendPrivate', 'reply', 'sendBurst', 'sendMessage', 'waitMessages', 'feedback', 'getMyRecent', 'getMessageDetail', 'getActiveMembers', 'setWakeConfig', 'markRead', 'memory', 'longMemory', 'slangQuery', 'slangSubmit', 'getImages', 'getForwardMsg', 'sendPoke', 'listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker', 'getSelfImage', 'sendVoice'];
           if (body.tools && typeof body.tools === 'object') {
             merged.tools = { ...(current.tools ?? {}), ...body.tools };
             for (const k of toolFlags) {
@@ -4674,6 +5101,7 @@ async function main() {
             setWakeConfig: 'qq_set_wake_config',
             markRead: 'qq_mark_read',
             memory: 'qq_memory_append / qq_memory_query / qq_memory_remove / qq_memory_clear',
+            longMemory: 'qq_long_memory_add / qq_long_memory_list',
             slangQuery: 'qq_slang_query',
             slangSubmit: 'qq_slang_submit',
             getImages: 'qq_get_message_images',
@@ -7992,6 +8420,8 @@ async function main() {
 
   function sendMessagesV2(key, messages, delays, replyToMessageId, atUserId = null) {
     const assertSendAllowed = captureSendGuard(key);
+    // AI 回复也驱动情感：reserved2 的发送统一走这里，用自己说了什么对称演化心情。
+    if (Array.isArray(messages) && messages.length) recordEmotionForKey(key, messages.join(' '));
     const [kind, id] = key.split(':');
     const sent = [];
     const failed = [];
@@ -8062,6 +8492,8 @@ async function main() {
       return false;
     }
     await sendToQQ(key, text);
+    // AI 回复也驱动情感：让心情由「用户消息 + 自己说了什么」对称演化。
+    recordEmotionForKey(key, text);
     return true;
   }
 
@@ -9154,10 +9586,10 @@ async function main() {
         promptText += `\n\n【本次消息快照】\n${JSON.stringify(wakeSnapshot)}\n以上消息已提供，无需重复查询；partial=true 时用 qq_get_unread_messages(afterSeq=readThroughSeq) 继续读取。先处理当前消息；回复前如需确认后续补充，用 qq_wait_for_messages(purpose="reply") 补足短静默，已安静够久会立即返回，不要先长等。收尾只确认你已处理的 readThroughSeq（本地 seq，非 QQ messageId），传给 qq_mark_read 或 qq_set_wake_config 的 throughSeq；新到消息留待处理。`;
       }
     }
-    let content = [{ type: 'text', text: withSlangContext(promptText) }];
+    let content = [{ type: 'text', text: withSlangContext(promptText, key) }];
     if (Array.isArray(opts.media) && opts.media.length > 0) {
       const imageParts = await resolveMediaList(opts.media);
-      content = [{ type: 'text', text: withSlangContext(promptText) }, ...imageParts];
+      content = [{ type: 'text', text: withSlangContext(promptText, key) }, ...imageParts];
     }
     // 媒体解析成功后再标记退场，避免解析异常时残留退场标记。
     if (!isCurrentSession(key, sessionId)) throw new Error('投递前会话已重置或权限已变化');
@@ -10970,6 +11402,12 @@ async function main() {
       // 其余 / 开头内容照常发给 DSH（DSH 的斜杠命令原样执行，如 /model）
     }
 
+    // 记忆/情感：每条真实聊天消息（非命令）喂一次说话尺 + 更新情感 + 尝试自动记录。
+    // 放在命令检查之后、reserved2 早退之前，这样 reserved2 的群聊也照常积累。
+    const memorySender = kind === 'group' ? (event.sender?.card || event.sender?.nickname || String(event.user_id)) : '私聊';
+    recordChatForMemoryAndEmotion(key, plainContent);
+    feedMemoryWindow(key, memorySender, plainContent);
+
     // 二代仿真模式（reserved2）：唤醒调度
     if (currentMode === 'reserved2') {
       const sender = kind === 'group' ? (event.sender?.card || event.sender?.nickname || String(event.user_id)) : '私聊';
@@ -11120,10 +11558,10 @@ async function main() {
       }
       throw error;
     }
-    let content = [{ type: 'text', text: withSlangContext(promptText) }];
+    let content = [{ type: 'text', text: withSlangContext(promptText, key, textContent) }];
     if (Array.isArray(mediaList) && mediaList.length > 0) {
       const imageParts = await resolveMediaList(mediaList);
-      content = [{ type: 'text', text: withSlangContext(promptText) }, ...imageParts];
+      content = [{ type: 'text', text: withSlangContext(promptText, key, textContent) }, ...imageParts];
     }
     if (!isCurrentSession(key, sessionId)) throw new Error('投递前会话已重置或权限已变化');
     const accepted = await api.sessions.prompt({
@@ -11387,8 +11825,8 @@ async function main() {
                       waiter.reject(new Error(`学习会话 turn 未正常完成：${learnerEnded.reason.kind}`));
                     }
                   }
-                  // 旧学习会话 turn 结束后从集合移除，避免残留
-                  if (frame.sessionId !== slangLearnerSessionId) learnerSessions.delete(frame.sessionId);
+                  // 旧学习会话 turn 结束后从集合移除，避免残留（黑话/记忆两个 learner 保留）
+                  if (frame.sessionId !== slangLearnerSessionId && frame.sessionId !== memoryLearnerSessionId) learnerSessions.delete(frame.sessionId);
                 }
               }
               continue;

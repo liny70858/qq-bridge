@@ -326,6 +326,8 @@ const TOOL_CONFIG_FLAGS = {
   qq_memory_query: 'memory',
   qq_memory_remove: 'memory',
   qq_memory_clear: 'memory',
+  qq_long_memory_add: 'longMemory',
+  qq_long_memory_list: 'longMemory',
   qq_slang_query: 'slangQuery',
   qq_slang_submit: 'slangSubmit',
   qq_send_voice: 'sendVoice',
@@ -1404,5 +1406,39 @@ if (cfg.socialV2?.tools?.getForwardMsg !== false) {
     }
   );
 }
+
+server.tool(
+  'qq_long_memory_add',
+  '把一件值得**长期**记住的事写进这个会话的长期记忆（会淡忘、带时间，与 qq_memory_append 的「轻量记忆」不同：那是短期话题/想说的话）。只记长期有价值的事：群友明确说的重要信息、喜好、约定、身份、状态（生病/很累/开心）。一条只装一件事；不要记日常琐事、不要记你自己做过的事、不要重复记。记的时候安静地记，回复里不要说「记下了」。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    text: z.string().describe('要记住的事，一句话说清（第一人称；群友用 ta 或名字，别把所有人都写成 ta）'),
+    importance: z.number().min(0).max(1).optional().describe('重要度：0=随口提过，0.5=比较重要，1=非常重要（约定/身份/核心状态）。不确定写 0.5'),
+    factKey: z.string().optional().describe('可选。这条讲的是哪一件事，用「对象.方面」写，如 ta.身高、约定.周末。同一个键只留最新一条；拿不准就留空')
+  },
+  async ({ key, token, text, importance, factKey }) => {
+    try {
+      const data = await agentApi('/api/memory/agent-add', { method: 'POST', body: JSON.stringify({ key, text, importance, factKey }), headers: { 'x-agent-token': token } });
+      return { content: [{ type: 'text', text: data && data.message ? data.message : '✓' }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `记录长期记忆失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_long_memory_list',
+  '列出这个会话已记下的长期记忆（只读），用于确认自己记得什么、避免重复记。',
+  { key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'), token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）') },
+  async ({ key, token }) => {
+    try {
+      const data = await agentApi(`/api/memory/agent-list?key=${encodeURIComponent(key)}`, { headers: { 'x-agent-token': token } });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `读取长期记忆失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
 
 await server.connect(new StdioServerTransport());
