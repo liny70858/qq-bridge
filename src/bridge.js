@@ -753,8 +753,8 @@ function loadConfig() {
     // 情感状态（每会话一份，会演化、会回归基线）：见 src/emotion.js。
     emotion: {
       enabled: true,
-      alpha: 0.35,           // 心情对每条消息的响应快慢（0~1，越大越敏感）
-      moodHalfLifeHours: 6,  // 没有输入时心情多久淡一半
+      alpha: 0.6,            // 心情对每条消息的响应快慢（0~1，越大越敏感）
+      moodHalfLifeHours: 3,  // 没有输入时心情多久淡一半（3 小时 ≈ 真人情绪回落节奏）
       ...(file.emotion ?? {})
     },
     social: {

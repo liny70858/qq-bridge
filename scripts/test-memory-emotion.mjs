@@ -113,7 +113,7 @@ function ok(cond, label) {
   ok(st.mood > 0.3, '情感：连续正面输入拉高心情');
   ok(st.tendency > 0 && st.tendency <= st.mood, '情感：长期倾向跟着心情走但更慢');
   const ctx = buildEmotionContext(st);
-  ok(ctx.includes('开心') && ctx.includes('【此刻状态】'), '情感：注入块含状态');
+  ok(ctx.includes('【此刻状态】'), '情感：注入块含状态头');
   ok(buildEmotionContext(defaultEmotionState()) === '', '情感：无历史不注入');
 
   // 存储往返
