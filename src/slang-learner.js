@@ -365,6 +365,15 @@ export function parseExtractionJson(text) {
     }));
 }
 
+// 模型的 confirmed 字段可能写成布尔 true，也可能写成字符串 "true"/"是"/"1"，甚至干脆漏填。
+// 只要不是明确否定（false/"false"/0/"否"），且给了 meaning，就当已确认——否则研究结果会被静默跳过。
+function isResearchConfirmed(item) {
+  const v = item.confirmed;
+  if (v === true || v === 'true' || v === 1 || v === '1' || v === '是' || v === 'yes' || v === 'YES') return true;
+  if (v === undefined || v === null || v === '') return Boolean(String(item.meaning ?? '').trim());
+  return false;
+}
+
 export function parseResearchJson(text) {
   const data = extractJsonArray(text);
   if (!Array.isArray(data)) return [];
@@ -377,6 +386,6 @@ export function parseResearchJson(text) {
       example: String(item.example ?? '').trim(),
       risk: String(item.risk ?? '').trim(),
       sources: Array.isArray(item.sources) ? item.sources.map((s) => String(s ?? '').trim()).filter(Boolean).slice(0, 10) : [],
-      confirmed: item.confirmed === true,
+      confirmed: isResearchConfirmed(item),
     }));
 }

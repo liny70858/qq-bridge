@@ -2508,10 +2508,19 @@ async function main() {
       }
       const output = await waitLearnerTurn(sessionId);
       const results = parseResearchJson(output);
+      if (!results.length) {
+        log(`黑话研究：未解析出有效结果（原始输出 ${output ? output.length : 0} 字）`);
+        return;
+      }
+      // 归一化词条匹配：模型可能给词条加空格/改大小写，别因为一字之差就静默找不到。
+      const normSlang = (s) => String(s ?? '').trim().toLowerCase();
       for (const r of results) {
-        const entry = slangEntries.find((e) => e.content === r.content);
-        if (!entry) continue;
-        // 只有明确确认（confirmed: true）的结果才写入解释字段；
+        const entry = slangEntries.find((e) => normSlang(e.content) === normSlang(r.content));
+        if (!entry) {
+          log(`黑话研究：找不到词条「${r.content}」（模型可能改写了词条名），跳过`);
+          continue;
+        }
+        // 只有明确确认的结果才写入解释字段；
         // 不确定/未确认的结果保留原状，允许后续再次研究。
         if (r.confirmed !== true) {
           log(`黑话研究：${r.content} 未确认，保留候选待后续研究`);
@@ -4179,6 +4188,24 @@ async function main() {
           }
           try { saveEmotions(EMOTION_FILE, emotionStates); } catch (error) { log('保存情感库失败:', error?.message ?? error); }
           sendJson({ ok: true });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/emotion/config') {
+          const body = await readBody();
+          const configFile = path.join(ROOT, 'config.json');
+          const file = readConfigObject(configFile);
+          const merged = { ...(file.emotion ?? {}) };
+          if (body.alpha !== undefined) {
+            merged.alpha = Math.min(1, Math.max(0.1, Number(body.alpha) || 0.6));
+          }
+          if (body.moodHalfLifeHours !== undefined) {
+            merged.moodHalfLifeHours = Math.min(48, Math.max(1, Number(body.moodHalfLifeHours) || 3));
+          }
+          file.emotion = merged;
+          atomicWriteJson(configFile, file);
+          cfg.emotion = { ...cfg.emotion, ...merged };
+          log(`控制台：情感参数已更新 alpha=${cfg.emotion.alpha} moodHalfLifeHours=${cfg.emotion.moodHalfLifeHours}`);
+          sendJson({ ok: true, config: { alpha: cfg.emotion.alpha, moodHalfLifeHours: cfg.emotion.moodHalfLifeHours } });
           return;
         }
 

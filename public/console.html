@@ -2388,6 +2388,7 @@ button:active:not(:disabled) {
       </div>
       <div class="row" style="margin-top:8px">
         <button id="slangAdd" class="small">添加入库（确认）</button>
+        <button id="slangAddCandidate" class="small">添加为候选（仅词条，等研究）</button>
       </div>
       <details style="margin-top:10px">
         <summary class="meta">黑话系统参数（可调）</summary>
@@ -2463,6 +2464,19 @@ button:active:not(:disabled) {
         <button id="emoResetAll" class="small danger">清空全部</button>
         <span class="meta" id="emoMsg"></span>
       </div>
+      <details style="margin-top:10px">
+        <summary class="meta">情感参数（可在线调，保存即热生效，无需重启）</summary>
+        <div class="row">
+          <label style="flex:1">响应快慢 alpha（0.1~1，越大心情变化越快越明显）</label><input type="number" id="emoAlpha" min="0.1" max="1" step="0.05" style="width:90px">
+        </div>
+        <div class="row">
+          <label style="flex:1">情绪回落半衰期（小时，1~48，越小越快回到平静）</label><input type="number" id="emoHalfLife" min="1" max="48" step="0.5" style="width:90px">
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button id="emoConfigSave" class="small">保存情感参数</button>
+          <span class="meta" id="emoConfigMsg"></span>
+        </div>
+      </details>
       <div class="memory-scroll" id="emoList" style="margin-top:10px;max-height:420px;overflow:auto">加载中…</div>
     </section>
 
@@ -4376,6 +4390,17 @@ document.getElementById('slangAdd').addEventListener('click', async () => {
     refreshSlang();
   }
 });
+document.getElementById('slangAddCandidate').addEventListener('click', async () => {
+  const content = document.getElementById('slangContent').value.trim();
+  if (!content) { alert('词条不能为空'); return; }
+  const r = await api('/api/slang', 'POST', { content, status: 'candidate' });
+  document.getElementById('slangMsg').textContent = r.ok ? '✅ 已添加为候选（可送 DSH 研究）' : ('❌ ' + (r.error || '失败'));
+  document.getElementById('slangMsg').className = r.ok ? 'meta ok' : 'meta err';
+  if (r.ok) {
+    document.getElementById('slangContent').value = '';
+    refreshSlang();
+  }
+});
 document.getElementById('slangExtract').addEventListener('click', async () => {
   const r = await api('/api/slang/extract', 'POST', {});
   setSlangMsg(r.ok ? '✅ 已触发提取' : ('❌ ' + (r.error || '失败')), r.ok);
@@ -4546,6 +4571,10 @@ async function loadEmotionStore() {
     const states = r.states || [];
     const box = document.getElementById('emoList');
     document.getElementById('emoMsg').textContent = r.writable ? '' : '（只读降级）';
+    if (r.config) {
+      document.getElementById('emoAlpha').value = r.config.alpha ?? 0.6;
+      document.getElementById('emoHalfLife').value = r.config.moodHalfLifeHours ?? 3;
+    }
     if (!states.length) { box.innerHTML = '<span class="meta">暂无情感状态（有群聊互动后会自动出现）</span>'; return; }
     box.innerHTML = states.map((s) => {
       const mood = (s.mood > 0 ? '+' : '') + (s.mood || 0).toFixed(2);
@@ -4566,12 +4595,20 @@ async function resetEmotion(key) {
   if (r.ok) { showConsoleToast('已重置'); loadEmotionStore(); }
   else showConsoleToast(r.error || '重置失败');
 }
+async function saveEmotionConfig() {
+  const alpha = Number(document.getElementById('emoAlpha').value);
+  const halfLife = Number(document.getElementById('emoHalfLife').value);
+  const r = await api('/api/emotion/config', 'POST', { alpha, moodHalfLifeHours: halfLife });
+  if (r.ok) { showConsoleToast('情感参数已保存并生效'); loadEmotionStore(); }
+  else showConsoleToast(r.error || '保存失败');
+}
 
 document.getElementById('memRefresh').addEventListener('click', loadMemoryStore);
 document.getElementById('memFilterScope').addEventListener('change', loadMemoryStore);
 document.getElementById('memAdd').addEventListener('click', addMemory);
 document.getElementById('memRecall').addEventListener('click', testRecall);
 document.getElementById('emoRefresh').addEventListener('click', loadEmotionStore);
+document.getElementById('emoConfigSave').addEventListener('click', saveEmotionConfig);
 document.getElementById('emoResetAll').addEventListener('click', async () => {
   const r = await api('/api/emotion/reset', 'POST', {});
   if (r.ok) { showConsoleToast('已清空全部'); loadEmotionStore(); }
