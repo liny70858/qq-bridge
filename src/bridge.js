@@ -2988,8 +2988,12 @@ async function main() {
   /** 当前模式下的会话预设；返回 undefined 表示「该模式下没有可安全使用的 preset」 */
   function modePreset(key, mode, cfg) {
     if (mode === 'closed-agent') {
+      // 留空 = 不挂任何 preset，让 DSH 用自己内置的默认 coding 工具面（bash/文件/子代理等）。
+      // 之前这里走 resolvePresetName('') 会回退到 dshDefaultPreset，而 DSH 的默认 preset 被
+      // 桥接 setup 设成了 qq-chat-v2（无本地工具），导致封闭模式反而拿不到 bash。
+      if (!String(closedAgentPreset ?? '').trim()) return undefined;
       const chosen = resolvePresetName(closedAgentPreset);
-      if (!chosen) log('⚠️ 无法确定 closed-agent 的 preset（DSH preset 清单未知），将按 DSH 默认 preset 建会话');
+      if (!chosen) log(`⚠️ 无法确定 closed-agent 的 preset「${closedAgentPreset}」`);
       return chosen || undefined;
     }
     // 二代仿真模式优先使用 socialV2.agentPreset；未配置时回退到默认聊天预设。
