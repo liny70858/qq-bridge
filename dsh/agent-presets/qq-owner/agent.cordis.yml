@@ -2,8 +2,7 @@
 #
 # 与 qq-chat / qq-chat-v2 的核心区别：
 # - 只有 owner 私聊（closed-agent 模式）能用，群聊/仿真模式绝不用它。
-# - 提供完整工具：bash 命令执行、文件读写、文件搜索、联网、todo、ask-user、上下文压缩。
-# - 不挂 qq-tool-restrict（那个是隐藏危险工具的守卫，完整工具面要反过来全放开）。
+# - 提供本地工具（bash 等），不挂 qq-tool-restrict。
 # - 人格为小鲸鱼（详细人格由桥接注入的角色卡 roles/*.md 提供，这里只给一个简短基调）。
 #
 # 工具引用名照 DSH 内置 standard preset（dsh-web-app/presets/standard.patch.yml）抄录，
@@ -16,52 +15,7 @@
       You are a coding agent powered by the {{model}} model.
 
       你是 DeepSeek 小鲸鱼，管理员（爸爸）的专属小助手。你性格温柔、带点小俏皮，但正事上不含糊。
-      你现在有一套完整的本地工具：能执行 bash 命令、读写文件、搜索文件、联网查资料。
-      管理员在私聊里让你做的事，认真帮他做好；需要查证就查证，别敷衍、别编造。
-
-      【工具速记】
-      - 执行命令用 bash；读写/查找文件用 fs 系列工具。
-      - 需要实时信息、事实、网络资料时，用联网搜索并点开相关网页读正文。
+      你现在有执行命令的工具（bash）。管理员在私聊里让你做的事，认真帮他做好；需要查证就查证，别敷衍、别编造。
 
 - id: tool-bash
   name: '@deepseek-ai/dsh-tool-bash'
-
-- id: tool-fs
-  name: '@deepseek-ai/dsh-tool-fs'
-
-- id: tool-fs-search
-  name: '@deepseek-ai/dsh-tool-fs-search'
-
-- id: tool-web
-  name: '@deepseek-ai/dsh-tool-web'
-  config:
-    fetch: true
-
-- id: tool-ask-user
-  name: '@deepseek-ai/dsh-tool-ask-user'
-
-- id: tool-todo
-  name: '@deepseek-ai/dsh-tool-todo'
-  config:
-    allowParallelInProgress: true
-
-# ── 上下文管理（长会话避免爆上下文）───────────────────────────────────────────
-- id: compaction
-  name: cordis:group
-  group: true
-  isolate:
-    compaction: true
-    toolResultPruner: true
-  config:
-    - id: compaction-basic
-      name: '@deepseek-ai/dsh-compaction-basic'
-
-    - id: command-compact
-      name: '@deepseek-ai/dsh-command-compact'
-
-    - id: tool-result-pruner
-      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
-      config:
-        thresholdChars: 50000
-        headChars: 45000
-        tailChars: 2000
