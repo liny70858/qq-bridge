@@ -1471,6 +1471,18 @@ async function main() {
   const memoryWindows = new Map();       // key -> [{sender,text,time}]：模型提炼的近期消息窗口
   const memoryExtractionCooldowns = new Map(); // key -> timestamp
   let memoryLearnerSessionId = null;
+  // 封闭模式（closed-agent）的会话令牌：让 v2 工具（表情包/语音/记忆等）在封闭模式下也能用。
+  // 与 reserved2 的 social-v2.json 令牌分开存，避免触发 reserved2 的唤醒/潜水定时器。
+  const closedAgentTokens = new Map();   // key -> token（内存态，重启后重新签发，靠 rememberAgentToken 两代兜底）
+  function getClosedAgentToken(key) {
+    let tk = closedAgentTokens.get(key);
+    if (!tk) {
+      tk = crypto.randomBytes(16).toString('hex');
+      closedAgentTokens.set(key, tk);
+      rememberAgentToken(key, tk);
+    }
+    return tk;
+  }
   try {
     memoryEntries = loadMemories(MEMORY_FILE, { onCorrupt: (message) => log(`⚠️ ${message}`) });
   } catch (error) {
@@ -3644,8 +3656,8 @@ async function main() {
           sendJson({ ok: false, error: '二代模式已关闭，当前不允许执行 v2 工具' }, 403);
           return;
         }
-        // 模式隔离：带 agent token 的 v2 接口只允许在 reserved2 模式下使用
-        if (req.headers['x-agent-token'] && url.pathname.startsWith('/api/socialV2/') && currentMode !== 'reserved2') {
+        // 模式隔离：带 agent token 的 v2 接口只允许在 reserved2 / closed-agent 模式下使用
+        if (req.headers['x-agent-token'] && url.pathname.startsWith('/api/socialV2/') && currentMode !== 'reserved2' && currentMode !== 'closed-agent') {
           sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403);
           return;
         }
@@ -6127,7 +6139,7 @@ async function main() {
           const voice = voiceCfg();
           if (!voice.enabled) { sendJson({ ok: false, error: '语音功能已关闭' }, 403); return; }
           if (!key) { sendJson({ ok: false, error: 'key 不能为空（格式 group:群号 或 private:QQ号）' }, 400); return; }
-          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
+          if (currentMode !== 'reserved2' && currentMode !== 'closed-agent') { sendJson({ ok: false, error: '该接口仅 reserved2 / closed-agent 模式可用' }, 403); return; }
           if (!token) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token' }, 403); return; }
           if (!agentTokenOk(key, token)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           if (!v2ToolEnabled('sendVoice')) { sendJson({ ok: false, error: '工具未启用：qq_send_voice' }, 403); return; }
@@ -6202,7 +6214,7 @@ async function main() {
           if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('sendSticker')) { sendJson({ ok: false, error: '工具未启用：qq_send_sticker' }, 403); return; }
-          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
+          if (currentMode !== 'reserved2' && currentMode !== 'closed-agent') { sendJson({ ok: false, error: '该接口仅 reserved2 / closed-agent 模式可用' }, 403); return; }
           if (!req.headers['x-agent-token']) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token' }, 403); return; }
           const keyMatch = /^(group|private):(\d+)$/.exec(key);
           if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
@@ -8522,7 +8534,17 @@ async function main() {
       }
       return false;
     }
-    await sendToQQ(key, text);
+    // 封闭模式（closed-agent）：按空格分条、真人式间隔发送，其余模式整段发送。
+    if (currentMode === 'closed-agent') {
+      const plan = planSocialTimeline(text, cfg.social);
+      if (plan.main.length > 1) {
+        await sendBurstToQQ(key, plan.main, cfg.social);
+      } else {
+        await sendToQQ(key, text);
+      }
+    } else {
+      await sendToQQ(key, text);
+    }
     // AI 回复也驱动情感：让心情由「用户消息 + 自己说了什么」对称演化。
     recordEmotionForKey(key, text);
     return true;
@@ -11474,7 +11496,12 @@ async function main() {
 
     // 群聊里带发送者信息，私聊不用；角色提示注入到消息开头（agent 可见）；
     // 管理员消息带身份标记（供 agent 识别，但其权限仍受工具面硬限制）
-    const promptText = (roleHint ? roleHint + '\n\n' : '')
+    // 封闭模式：签发并注入会话令牌，让 v2 工具（表情包/语音/记忆等）也能用。
+    const closedAgentTokenLine = (currentMode === 'closed-agent' && isOwner)
+      ? `【会话令牌】${getClosedAgentToken(key)}（调用工具时请在参数中带上此令牌）\n\n`
+      : '';
+    const promptText = closedAgentTokenLine
+      + (roleHint ? roleHint + '\n\n' : '')
       + (isOwner ? '【管理员】' : '')
       + (kind === 'group'
         ? `${event.sender?.card || event.sender?.nickname || String(event.user_id)}：${textContent}`
