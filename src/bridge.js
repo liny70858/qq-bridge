@@ -12158,7 +12158,17 @@ async function main() {
                   }
                   log(`agent 回复 (${key}) ${plain.length} 字`);
                   appendActivity(`${key} agent 回复：${plain.slice(0, 80)}${plain.length > 80 ? '…' : ''}`);
-                  await sendToQQ(key, plain);
+                  // 封闭模式：按空格分条（真人式间隔发送），其余模式整段发送。
+                  if (currentMode === 'closed-agent') {
+                    const plan = planSocialTimeline(plain, cfg.social);
+                    if (plan.main.length > 1) {
+                      await sendBurstToQQ(key, plan.main, cfg.social);
+                    } else {
+                      await sendToQQ(key, plain);
+                    }
+                  } else {
+                    await sendToQQ(key, plain);
+                  }
                 }
               } else if (ended.reason.kind === 'error') {
                 const msg = ended.reason.error?.message ?? '未知错误';
