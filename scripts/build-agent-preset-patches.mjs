@@ -103,8 +103,10 @@ function normalizeRows(rows, preset) {
     return next;
   });
   const normalized = walk(rows, 'plugins');
-  for (const required of ['persona', 'qq-tool-restrict']) {
-    if (!seen.has(required)) throw new Error(`${preset}: 行列表缺少 ${required} 行（安全/人格边界不允许缺失）`);
+  // qq-owner 是 owner 专用完整工具面，故意不挂 qq-tool-restrict（其余 preset 必须挂，防止把本地工具暴露给 QQ 群）。
+  const required = preset === 'qq-owner' ? ['persona'] : ['persona', 'qq-tool-restrict'];
+  for (const r of required) {
+    if (!seen.has(r)) throw new Error(`${preset}: 行列表缺少 ${r} 行（安全/人格边界不允许缺失）`);
   }
   return normalized;
 }
