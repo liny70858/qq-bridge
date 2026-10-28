@@ -1471,17 +1471,13 @@ async function main() {
   const memoryWindows = new Map();       // key -> [{sender,text,time}]：模型提炼的近期消息窗口
   const memoryExtractionCooldowns = new Map(); // key -> timestamp
   let memoryLearnerSessionId = null;
-  // 封闭模式（closed-agent）的会话令牌：让 v2 工具（表情包/语音/记忆等）在封闭模式下也能用。
-  // 与 reserved2 的 social-v2.json 令牌分开存，避免触发 reserved2 的唤醒/潜水定时器。
-  const closedAgentTokens = new Map();   // key -> token（内存态，重启后重新签发，靠 rememberAgentToken 两代兜底）
+  // 封闭模式（closed-agent）的会话令牌：复用 socialV2 状态签发（agentTokenOk 校验的正是
+  // socialV2.conversations 里的 token，不能用单独的 Map，否则 token 永远「无效」）。
   function getClosedAgentToken(key) {
-    let tk = closedAgentTokens.get(key);
-    if (!tk) {
-      tk = crypto.randomBytes(16).toString('hex');
-      closedAgentTokens.set(key, tk);
-      rememberAgentToken(key, tk);
-    }
-    return tk;
+    const had = socialV2.conversations.has(canonicalV2Key(key));
+    const st = getSocialV2State(key);
+    if (!had) saveSocialV2State(); // 首次签发时持久化，保证跨重启令牌稳定
+    return st.agentToken;
   }
   try {
     memoryEntries = loadMemories(MEMORY_FILE, { onCorrupt: (message) => log(`⚠️ ${message}`) });
