@@ -5454,7 +5454,7 @@ async function main() {
           const key = String(body.key ?? '').trim();
           const reason = String(body.reason ?? 'admin').trim() || 'admin';
           if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
-          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
+          if (currentMode !== 'reserved2' && currentMode !== 'closed-agent') { sendJson({ ok: false, error: '该接口仅 reserved2 / closed-agent 模式可用' }, 403); return; }
           const keyMatch = /^(group|private):(\d+)$/.exec(key);
           if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
           const kind = keyMatch[1];
@@ -5709,7 +5709,7 @@ async function main() {
           if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('sendMessage')) { sendJson({ ok: false, error: '工具未启用：qq_send_message' }, 403); return; }
-          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
+          if (currentMode !== 'reserved2' && currentMode !== 'closed-agent') { sendJson({ ok: false, error: '该接口仅 reserved2 / closed-agent 模式可用' }, 403); return; }
           if (!req.headers['x-agent-token']) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token' }, 403); return; }
           const keyMatch = /^(group|private):(\d+)$/.exec(key);
           if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
@@ -5817,7 +5817,7 @@ async function main() {
           const key = String(body.key ?? '').trim();
           const targetUserId = String(body.targetUserId ?? body.userId ?? '').trim();
           if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
-          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
+          if (currentMode !== 'reserved2' && currentMode !== 'closed-agent') { sendJson({ ok: false, error: '该接口仅 reserved2 / closed-agent 模式可用' }, 403); return; }
           if (!req.headers['x-agent-token']) { sendJson({ ok: false, error: 'reserved2 模式发送拍一拍必须携带 agent token' }, 403); return; }
           if (!agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
@@ -6595,7 +6595,7 @@ async function main() {
           }
           const waitedMs = Date.now() - start;
           if (socialV2.conversations.get(canonicalV2Key(key)) !== st ||
-              (req.headers['x-agent-token'] && (currentMode !== 'reserved2' || socialV2.paused || cfg.socialV2?.enabled === false
+              (req.headers['x-agent-token'] && ((currentMode !== 'reserved2' && currentMode !== 'closed-agent') || socialV2.paused || cfg.socialV2?.enabled === false
                 || !agentTokenOk(key, req.headers['x-agent-token']) || !v2SessionAllowed(key) || !v2ToolEnabled('waitMessages')))) {
             finishWait();
             sendJson({ ok: false, error: '等待期间会话已重置或权限已变化，请重新读取会话' }, 403);
@@ -8530,17 +8530,7 @@ async function main() {
       }
       return false;
     }
-    // 封闭模式（closed-agent）：按空格分条、真人式间隔发送，其余模式整段发送。
-    if (currentMode === 'closed-agent') {
-      const plan = planSocialTimeline(text, cfg.social);
-      if (plan.main.length > 1) {
-        await sendBurstToQQ(key, plan.main, cfg.social);
-      } else {
-        await sendToQQ(key, text);
-      }
-    } else {
-      await sendToQQ(key, text);
-    }
+    await sendToQQ(key, text);
     // AI 回复也驱动情感：让心情由「用户消息 + 自己说了什么」对称演化。
     recordEmotionForKey(key, text);
     return true;
@@ -9664,7 +9654,7 @@ async function main() {
       // rejected/stale deliveries must not be cleared by an old cursor.
       noteModelMessagesV2(wakeState, [...wakeSnapshot.messages, ...wakeSnapshot.recent]);
     }
-    if (accepted.result.value.command?.text && !opts.silent && currentMode !== 'reserved2') {
+    if (accepted.result.value.command?.text && !opts.silent && currentMode !== 'reserved2' && currentMode !== 'closed-agent') {
       if (opts.farewell) social.exitingSessions.delete(sessionId);
       await auditAndSend(key, mdToPlain(accepted.result.value.command.text));
     } else if (accepted.result.value.command?.text && opts.silent && opts.farewell) {
@@ -12150,6 +12140,10 @@ async function main() {
                 } else if (currentMode === 'reserved2') {
                   log(`[reserved2] AI 内部输出（不自动转发）(${key}): ${plain.slice(0, 80)}`);
                   appendActivity(`${key} [reserved2] AI 内部输出：${plain.slice(0, 80)}${plain.length > 80 ? '…' : ''}`);
+                } else if (currentMode === 'closed-agent') {
+                  // 封闭模式：文本不自动转发，AI 用 qq_send_message 等工具自行发送（与 reserved2 一致）。
+                  log(`[closed-agent] AI 内部输出（不自动转发）(${key}): ${plain.slice(0, 80)}`);
+                  appendActivity(`${key} [closed-agent] AI 内部输出：${plain.slice(0, 80)}${plain.length > 80 ? '…' : ''}`);
                 } else {
                   if (shouldBlockSilentReply(key)) {
                     log(`静默模式，拦截在途回复 (${key})`);
@@ -12158,17 +12152,7 @@ async function main() {
                   }
                   log(`agent 回复 (${key}) ${plain.length} 字`);
                   appendActivity(`${key} agent 回复：${plain.slice(0, 80)}${plain.length > 80 ? '…' : ''}`);
-                  // 封闭模式：按空格分条（真人式间隔发送），其余模式整段发送。
-                  if (currentMode === 'closed-agent') {
-                    const plan = planSocialTimeline(plain, cfg.social);
-                    if (plan.main.length > 1) {
-                      await sendBurstToQQ(key, plan.main, cfg.social);
-                    } else {
-                      await sendToQQ(key, plain);
-                    }
-                  } else {
-                    await sendToQQ(key, plain);
-                  }
+                  await sendToQQ(key, plain);
                 }
               } else if (ended.reason.kind === 'error') {
                 const msg = ended.reason.error?.message ?? '未知错误';
